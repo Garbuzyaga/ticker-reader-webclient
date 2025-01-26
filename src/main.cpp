@@ -29,7 +29,7 @@ std::unordered_map<int, std::vector<int64_t>> latency_map;
 const size_t LATENCY_WINDOW = 100;
 
 // Global structures for message uniqueness and synchronization
-std::unordered_set<std::string> global_unique_messages;
+std::unordered_set<uint64_t> global_unique_messages;
 std::mutex global_unique_mutex; // Mutex for synchronizing access to unique message set
 
 class WebSocketClient {
@@ -78,35 +78,34 @@ private:
             simdjson::ondemand::parser parser;
             auto doc = parser.iterate(json);
 
-            int64_t server_timestamp = doc["T"].get_int64();
-            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(receive_time.time_since_epoch()).count();
-            int64_t latency = now_ms - server_timestamp;
-
-            // Update latency map
-            {
-                std::lock_guard<std::mutex> lock(latency_mutex);
-                latency_map[m_id].push_back(latency);
-                if (latency_map[m_id].size() > LATENCY_WINDOW) {
-                    latency_map[m_id].erase(latency_map[m_id].begin());
-                }
-
-                if (latency_map[m_id].size() == LATENCY_WINDOW) {
-                    // Calculate and log percentiles
-                    auto& latencies = latency_map[m_id];
-                    std::vector<int64_t> sorted_latencies = latencies;
-                    std::sort(sorted_latencies.begin(), sorted_latencies.end());
-
-                    int64_t p50 = sorted_latencies[LATENCY_WINDOW / 2];
-                    int64_t p90 = sorted_latencies[(LATENCY_WINDOW * 90) / 100];
-
-                    std::cout << "[Client " << m_id << "] p50: " << p50 << " ms, p90: " << p90 << " ms" << std::endl;
-                }
-            }
-
-            // Deduplicate message before adding to queue
+            uint64_t msg_id = doc["u"].get_uint64();
             {
                 std::lock_guard<std::mutex> lock(global_unique_mutex);
-                if (global_unique_messages.insert(msg->get_payload()).second) { // If it's a new message
+                if (global_unique_messages.insert(msg_id).second) { // If it's a new message
+                    int64_t server_timestamp = doc["T"].get_int64();
+                    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(receive_time.time_since_epoch()).count();
+                    int64_t latency = now_ms - server_timestamp;
+
+                    {
+                        std::lock_guard<std::mutex> lock(latency_mutex);
+                        latency_map[m_id].push_back(latency);
+                        if (latency_map[m_id].size() > LATENCY_WINDOW) {
+                            latency_map[m_id].erase(latency_map[m_id].begin());
+                        }
+
+                        if (latency_map[m_id].size() == LATENCY_WINDOW) {
+                            // Calculate and log percentiles
+                            auto& latencies = latency_map[m_id];
+                            std::vector<int64_t> sorted_latencies = latencies;
+                            std::sort(sorted_latencies.begin(), sorted_latencies.end());
+
+                            int64_t p50 = sorted_latencies[LATENCY_WINDOW / 2];
+                            int64_t p90 = sorted_latencies[(LATENCY_WINDOW * 90) / 100];
+
+                            std::cout << "[Client " << m_id << "] p50: " << p50 << " ms, p90: " << p90 << " ms" << std::endl;
+                        }
+                    }
+
                     std::lock_guard<std::mutex> queue_lock(data_mutex);
                     data_queue.push(msg->get_payload() + ", \"latency_ms\":" + std::to_string(latency));
                     data_cv.notify_one();
@@ -117,7 +116,7 @@ private:
         }
     }
 
-    void on_open(websocketpp::connection_hdl) {
+    void on_open(websocketpp::connection_hdl hdl) {
         std::cout << "[Client " << m_id << "] Connection opened." << std::endl;
     }
 
@@ -197,4 +196,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-
